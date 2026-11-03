@@ -1,4 +1,4 @@
-"""Create and seed recipes.db. Run once after cloning: python init_db.py"""
+"""Create and seed recipes.db. Run once after cloning: python3 init_db.py"""
 
 import sqlite3
 
@@ -9,6 +9,13 @@ CREATE TABLE IF NOT EXISTS recipes (
     ingredients TEXT NOT NULL,
     instructions TEXT NOT NULL DEFAULT '',
     is_public INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL
 );
 """
 
