@@ -6,15 +6,21 @@ That is the point: you will add both, lesson by lesson, in Units 2 and 3.
 """
 
 import sqlite3
+import jwt
+from datetime import datetime, timedelta, timezone
+from dotenv import load_dotenv
 
 from werkzeug.security import generate_password_hash
 from werkzeug.security import check_password_hash
 from flask import Flask, g, jsonify, request
+import os
+
+load_dotenv()
 
 DATABASE = "recipes.db"
 
 app = Flask(__name__)
-
+app.config["JWT_SECRET"] = os.environ["JWT_SECRET"]
 
 def get_db():
     if "db" not in g:
@@ -144,12 +150,26 @@ def login():
     if user is None or not check_password_hash(user["password_hash"], password):
         return jsonify({"error": "invalid username or password"}), 401
 
+    # ✅ Credentials are valid here
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": str(user["id"]),              # identity claim as string
+        "exp": now + timedelta(hours=1),     # token expires in 1 hour
+    }
+
+    token = jwt.encode(
+        payload,
+        app.config["JWT_SECRET"],
+        algorithm="HS256",
+    )
+
     return jsonify({
         "message": "logged in successfully",
         "user": {
             "id": user["id"],
             "username": user["username"]
-        }
+        },
+        "token": token
     }), 200
 
 @app.patch("/recipes/<int:recipe_id>")
