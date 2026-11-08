@@ -70,9 +70,28 @@ def get_recipe(recipe_id):
 
 @app.post("/recipes")
 def create_recipe():
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return jsonify({"error": "missing or invalid authorization header"}), 401
+
+    token = auth_header.removeprefix("Bearer ").strip()
+    # we’ll verify this token next
+    
+    try:
+        payload = jwt.decode(
+            token,
+            app.config["JWT_SECRET"],
+            algorithms=["HS256"],
+        )
+    except jwt.PyJWTError:
+        return jsonify({"error": "invalid token"}), 401
+
+    user_id = payload["sub"]
+
     data = request.get_json(silent=True)
     if not data or not data.get("title") or not data.get("ingredients"):
         return jsonify({"error": "title and ingredients are required"}), 400
+    
     db = get_db()
     try:
         cur = db.execute(
@@ -88,9 +107,11 @@ def create_recipe():
         db.commit()
     except sqlite3.IntegrityError:
         return jsonify({"error": "a recipe with that title already exists"}), 409
+        
     row = db.execute(
         "SELECT * FROM recipes WHERE id = ?", (cur.lastrowid,)
     ).fetchone()
+    
     return jsonify(recipe_to_dict(row)), 201
 
 @app.post("/register")
