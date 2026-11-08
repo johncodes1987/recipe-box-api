@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from werkzeug.security import generate_password_hash
 from werkzeug.security import check_password_hash
 from flask import Flask, g, jsonify, request
+from functools import wraps
 import os
 
 load_dotenv()
@@ -46,6 +47,34 @@ def recipe_to_dict(row):
         "is_public": bool(row["is_public"]),
     }
 
+def require_auth(f):
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        # 1. Read header
+        auth_header = request.headers.get("Authorization", "")
+        if not auth_header.startswith("Bearer "):
+            return jsonify({"error": "missing or invalid authorization header"}), 401
+
+        # 2. Extract token
+        token = auth_header.removeprefix("Bearer ").strip()
+
+        # 3. Decode & verify
+        try:
+            payload = jwt.decode(
+                token,
+                app.config["JWT_SECRET"],
+                algorithms=["HS256"],
+            )
+        except jwt.PyJWTError:
+            return jsonify({"error": "invalid token"}), 401
+
+        # 4. Extract and store identity in Flask's g object
+        g.user_id = int(payload["sub"])
+        g.role = payload.get("role", "user")
+
+        return f(*args, **kwargs)
+
+    return wrapper
 
 @app.get("/")
 def hello():
@@ -69,24 +98,9 @@ def get_recipe(recipe_id):
 
 
 @app.post("/recipes")
+@require_auth
 def create_recipe():
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
-        return jsonify({"error": "missing or invalid authorization header"}), 401
-
-    token = auth_header.removeprefix("Bearer ").strip()
-    # we’ll verify this token next
-    
-    try:
-        payload = jwt.decode(
-            token,
-            app.config["JWT_SECRET"],
-            algorithms=["HS256"],
-        )
-    except jwt.PyJWTError:
-        return jsonify({"error": "invalid token"}), 401
-
-    user_id = payload["sub"]
+    user_id = g.user_id  # Available from @require_auth decorator
 
     data = request.get_json(silent=True)
     if not data or not data.get("title") or not data.get("ingredients"):
@@ -95,13 +109,14 @@ def create_recipe():
     db = get_db()
     try:
         cur = db.execute(
-            "INSERT INTO recipes (title, ingredients, instructions, is_public)"
-            " VALUES (?, ?, ?, ?)",
+            "INSERT INTO recipes (title, ingredients, instructions, is_public, user_id)"
+            " VALUES (?, ?, ?, ?, ?)",
             (
                 data["title"],
                 data["ingredients"],
                 data.get("instructions", ""),
                 1 if data.get("is_public", True) else 0,
+                user_id,  # Added user_id here to match the 5 columns!
             ),
         )
         db.commit()
@@ -113,41 +128,6 @@ def create_recipe():
     ).fetchone()
     
     return jsonify(recipe_to_dict(row)), 201
-
-@app.post("/register")
-def register_user():
-    data = request.get_json(silent=True)
-    if not data:
-        return jsonify({"error": "a JSON body is required"}), 400
-
-    username = data.get("username")
-    email = data.get("email")
-    password = data.get("password")
-
-    if not username or not email or not password:
-        return jsonify({"error": "username, email, and password are required"}), 400
-
-    password_hash = generate_password_hash(password)
-
-    db = get_db()
-    try:
-        cur = db.execute(
-            "INSERT INTO users (username, email, password_hash) VALUES (?, ?, ?)",
-            (username, email, password_hash),
-        )
-        db.commit()
-    except sqlite3.IntegrityError:
-        return jsonify({"error": "username or email already exists"}), 409
-
-    user_row = db.execute(
-        "SELECT id, username, email FROM users WHERE id = ?", (cur.lastrowid,)
-    ).fetchone()
-
-    return jsonify({
-        "id": user_row["id"],
-        "username": user_row["username"],
-        "email": user_row["email"]
-    }), 201
 
 @app.post("/login")
 def login():
@@ -200,27 +180,11 @@ def login():
     }), 200
 
 @app.patch("/recipes/<int:recipe_id>")
+@require_auth
 def update_recipe(recipe_id):
-    # Step 1: Verify the token (same pattern as create_recipe)
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
-        return jsonify({"error": "missing or invalid authorization header"}), 401
-
-    token = auth_header.removeprefix("Bearer ").strip()
-
-    try:
-        payload = jwt.decode(
-            token,
-            app.config["JWT_SECRET"],
-            algorithms=["HS256"],
-        )
-    except jwt.PyJWTError:
-        return jsonify({"error": "invalid token"}), 401
-
-    user_id = int(payload["sub"])
-    
-    # Read the role from the token payload (defaulting to "user" if not present)
-    role = payload.get("role", "user")
+    # Retrieve user identity stored by the @require_auth decorator
+    user_id = g.user_id
+    role = g.role
 
     data = request.get_json(silent=True)
     if not data:
@@ -240,7 +204,7 @@ def update_recipe(recipe_id):
     if role != "admin" and recipe["user_id"] != user_id:
         return jsonify({"error": "forbidden"}), 403
 
-    # Step 5: Only then run the update logic you already have
+    # Step 5: Only then run the update logic
     fields, values = [], []
     for column in ("title", "ingredients", "instructions"):
         if column in data:
@@ -270,27 +234,11 @@ def update_recipe(recipe_id):
 
 
 @app.delete("/recipes/<int:recipe_id>")
+@require_auth
 def delete_recipe(recipe_id):
-    # Step 1: Verify the token (same pattern as update_recipe and create_recipe)
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
-        return jsonify({"error": "missing or invalid authorization header"}), 401
-
-    token = auth_header.removeprefix("Bearer ").strip()
-
-    try:
-        payload = jwt.decode(
-            token,
-            app.config["JWT_SECRET"],
-            algorithms=["HS256"],
-        )
-    except jwt.PyJWTError:
-        return jsonify({"error": "invalid token"}), 401
-
-    user_id = int(payload["sub"])
-    
-    # Read the role from the token payload (defaulting to "user" if not present)
-    role = payload.get("role", "user")
+    # Retrieve user identity stored by the @require_auth decorator
+    user_id = g.user_id
+    role = g.role
 
     db = get_db()
 
