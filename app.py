@@ -163,8 +163,9 @@ def login():
 
     db = get_db()
     
+    # 1. Updated SELECT query to fetch the role from the database record
     user = db.execute(
-        "SELECT id, username, password_hash FROM users WHERE username = ?",
+        "SELECT id, username, password_hash, role FROM users WHERE username = ?",
         (username,)
     ).fetchone()
 
@@ -173,8 +174,11 @@ def login():
 
     # ✅ Credentials are valid here
     now = datetime.now(timezone.utc)
+    
+    # 2. Added "role" into the JWT payload using the value straight from the DB
     payload = {
         "sub": str(user["id"]),              # identity claim as string
+        "role": user["role"],                # role claim from database record
         "exp": now + timedelta(hours=1),     # token expires in 1 hour
     }
 
@@ -184,20 +188,59 @@ def login():
         algorithm="HS256",
     )
 
+    # 3. Included the role in the JSON response under "user" for easy visibility
     return jsonify({
         "message": "logged in successfully",
         "user": {
             "id": user["id"],
-            "username": user["username"]
+            "username": user["username"],
+            "role": user["role"]
         },
         "token": token
     }), 200
 
 @app.patch("/recipes/<int:recipe_id>")
 def update_recipe(recipe_id):
+    # Step 1: Verify the token (same pattern as create_recipe)
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return jsonify({"error": "missing or invalid authorization header"}), 401
+
+    token = auth_header.removeprefix("Bearer ").strip()
+
+    try:
+        payload = jwt.decode(
+            token,
+            app.config["JWT_SECRET"],
+            algorithms=["HS256"],
+        )
+    except jwt.PyJWTError:
+        return jsonify({"error": "invalid token"}), 401
+
+    user_id = int(payload["sub"])
+    
+    # Read the role from the token payload (defaulting to "user" if not present)
+    role = payload.get("role", "user")
+
     data = request.get_json(silent=True)
     if not data:
         return jsonify({"error": "a JSON body is required"}), 400
+
+    db = get_db()
+
+    # Step 2 & 3: Load the recipe by id and check if it exists
+    recipe = db.execute(
+        "SELECT * FROM recipes WHERE id = ?", (recipe_id,)
+    ).fetchone()
+
+    if recipe is None:
+        return jsonify({"error": "recipe not found"}), 404
+
+    # Step 4: Allow if admin OR owner; block with 403 otherwise
+    if role != "admin" and recipe["user_id"] != user_id:
+        return jsonify({"error": "forbidden"}), 403
+
+    # Step 5: Only then run the update logic you already have
     fields, values = [], []
     for column in ("title", "ingredients", "instructions"):
         if column in data:
@@ -208,8 +251,9 @@ def update_recipe(recipe_id):
         values.append(1 if data["is_public"] else 0)
     if not fields:
         return jsonify({"error": "nothing to update"}), 400
+        
     values.append(recipe_id)
-    db = get_db()
+    
     try:
         cur = db.execute(
             f"UPDATE recipes SET {', '.join(fields)} WHERE id = ?", values
@@ -217,21 +261,55 @@ def update_recipe(recipe_id):
         db.commit()
     except sqlite3.IntegrityError:
         return jsonify({"error": "a recipe with that title already exists"}), 409
-    if cur.rowcount == 0:
-        return jsonify({"error": "recipe not found"}), 404
+
     row = db.execute(
         "SELECT * FROM recipes WHERE id = ?", (recipe_id,)
     ).fetchone()
+    
     return jsonify(recipe_to_dict(row))
 
 
 @app.delete("/recipes/<int:recipe_id>")
 def delete_recipe(recipe_id):
+    # Step 1: Verify the token (same pattern as update_recipe and create_recipe)
+    auth_header = request.headers.get("Authorization", "")
+    if not auth_header.startswith("Bearer "):
+        return jsonify({"error": "missing or invalid authorization header"}), 401
+
+    token = auth_header.removeprefix("Bearer ").strip()
+
+    try:
+        payload = jwt.decode(
+            token,
+            app.config["JWT_SECRET"],
+            algorithms=["HS256"],
+        )
+    except jwt.PyJWTError:
+        return jsonify({"error": "invalid token"}), 401
+
+    user_id = int(payload["sub"])
+    
+    # Read the role from the token payload (defaulting to "user" if not present)
+    role = payload.get("role", "user")
+
     db = get_db()
+
+    # Step 2 & 3: Load the recipe by id and check if it exists
+    recipe = db.execute(
+        "SELECT * FROM recipes WHERE id = ?", (recipe_id,)
+    ).fetchone()
+
+    if recipe is None:
+        return jsonify({"error": "recipe not found"}), 404
+
+    # Step 4: Allow if admin OR owner; block with 403 otherwise
+    if role != "admin" and recipe["user_id"] != user_id:
+        return jsonify({"error": "forbidden"}), 403
+
+    # Step 5: Only then run the delete query
     cur = db.execute("DELETE FROM recipes WHERE id = ?", (recipe_id,))
     db.commit()
-    if cur.rowcount == 0:
-        return jsonify({"error": "recipe not found"}), 404
+    
     return "", 204
 
 
